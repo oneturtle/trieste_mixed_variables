@@ -1,0 +1,63 @@
+:py:mod:`trieste.models.keras.sampler`
+======================================
+
+.. py:module:: trieste.models.keras.sampler
+
+.. autoapi-nested-parse::
+
+   This module is the home of the sampling functionality required by some
+   of the Trieste's Keras model wrappers.
+
+
+
+Module Contents
+---------------
+
+.. py:class:: EnsembleTrajectorySampler(model: trieste.models.interfaces.EnsembleModel)
+
+   Bases: :py:obj:`trieste.models.interfaces.TrajectorySampler`\ [\ :py:obj:`trieste.models.interfaces.EnsembleModel`\ ]
+
+   This class builds functions that approximate a trajectory by randomly choosing a network from
+   the ensemble and using its predicted means as a trajectory.
+
+   :param model: The ensemble model to sample from.
+
+   .. py:method:: get_trajectory(self) -> trieste.models.interfaces.TrajectoryFunction
+
+      Generate an approximate function draw (trajectory) by randomly choosing a network from
+      the ensemble and using its predicted means as a trajectory.
+
+      :return: A trajectory function representing an approximate trajectory
+          from the model, taking an input of shape `[N, 1, D]` and returning shape `[N, 1]`.
+
+
+   .. py:method:: resample_trajectory(self, trajectory: trieste.models.interfaces.TrajectoryFunction) -> trieste.models.interfaces.TrajectoryFunction
+
+      Efficiently resample a :const:`TrajectoryFunction` in-place to avoid function retracing
+      with every new sample.
+
+      :param trajectory: The trajectory function to be resampled.
+      :return: The new resampled trajectory function.
+
+
+
+.. py:class:: ensemble_trajectory(model: trieste.models.interfaces.EnsembleModel)
+
+   Bases: :py:obj:`trieste.models.interfaces.TrajectoryFunctionClass`
+
+   Generate an approximate function draw (trajectory) by randomly choosing a network from
+   the ensemble and using its predicted means as a trajectory.
+
+   :param model: The model of the objective function.
+
+   .. py:method:: __call__(self, x: trieste.types.TensorType) -> trieste.types.TensorType
+
+      Call trajectory function.
+
+
+   .. py:method:: resample(self) -> None
+
+      Efficiently resample in-place without retracing.
+
+
+

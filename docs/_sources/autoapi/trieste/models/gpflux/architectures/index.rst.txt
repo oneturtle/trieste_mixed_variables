@@ -1,0 +1,30 @@
+:py:mod:`trieste.models.gpflux.architectures`
+=============================================
+
+.. py:module:: trieste.models.gpflux.architectures
+
+.. autoapi-nested-parse::
+
+   This file contains wrappers for some implementations of basic GPflux architectures. Currently only
+   a `vanilla` DGP architecture, based off the `gpflux.architectures.build_constant_input_dim_deep_gp`
+   is provided.
+
+
+
+Module Contents
+---------------
+
+.. py:function:: build_vanilla_deep_gp(query_points: trieste.types.TensorType, num_layers: int, num_inducing: int, inner_layer_sqrt_factor: float = 1e-05, likelihood_noise_variance: float = 0.01, search_space: Optional[trieste.space.Box] = None) -> gpflux.models.DeepGP
+
+   Provides a wrapper around `build_constant_input_dim_deep_gp` from `gpflux.architectures`.
+
+   :param query_points: input data, used to determine inducing point locations with k-means.
+   :param num_layers: number of layers in deep GP.
+   :param num_inducing: number of inducing points to use in each layer.
+   :param inner_layer_sqrt_factor: A multiplicative factor used to rescale hidden layers
+   :param likelihood_noise_variance: initial noise variance
+   :param search_space: the search space for the Bayes Opt problem. Used for initialization of
+       inducing locations if num_inducing > len(query_points)
+   :return: :class:`gpflux.models.DeepGP`
+
+

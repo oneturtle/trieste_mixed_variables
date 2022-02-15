@@ -1,0 +1,235 @@
+:py:mod:`trieste.models.gpflow.sampler`
+=======================================
+
+.. py:module:: trieste.models.gpflow.sampler
+
+.. autoapi-nested-parse::
+
+   This module is the home of the sampling functionality required by Trieste's
+   GPflow wrappers.
+
+
+
+Module Contents
+---------------
+
+.. py:class:: IndependentReparametrizationSampler(sample_size: int, model: trieste.models.interfaces.ProbabilisticModel)
+
+   Bases: :py:obj:`trieste.models.interfaces.ReparametrizationSampler`\ [\ :py:obj:`trieste.models.interfaces.ProbabilisticModel`\ ]
+
+   This sampler employs the *reparameterization trick* to approximate samples from a
+   :class:`ProbabilisticModel`\ 's predictive distribution as
+
+   .. math:: x \mapsto \mu(x) + \epsilon \sigma(x)
+
+   where :math:`\epsilon \sim \mathcal N (0, 1)` is constant for a given sampler, thus ensuring
+   samples form a continuous curve.
+
+   :param sample_size: The number of samples to take at each point. Must be positive.
+   :param model: The model to sample from.
+   :raise ValueError (or InvalidArgumentError): If ``sample_size`` is not positive.
+
+   .. py:method:: sample(self, at: trieste.types.TensorType, *, jitter: float = DEFAULTS.JITTER) -> trieste.types.TensorType
+
+      Return approximate samples from the `model` specified at :meth:`__init__`. Multiple calls to
+      :meth:`sample`, for any given :class:`IndependentReparametrizationSampler` and ``at``, will
+      produce the exact same samples. Calls to :meth:`sample` on *different*
+      :class:`IndependentReparametrizationSampler` instances will produce different samples.
+
+      :param at: Where to sample the predictive distribution, with shape `[..., 1, D]`, for points
+          of dimension `D`.
+      :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+          the covariance matrix.
+      :return: The samples, of shape `[..., S, 1, L]`, where `S` is the `sample_size` and `L` is
+          the number of latent model dimensions.
+      :raise ValueError (or InvalidArgumentError): If ``at`` has an invalid shape or ``jitter``
+          is negative.
+
+
+
+.. py:class:: BatchReparametrizationSampler(sample_size: int, model: trieste.models.interfaces.SupportsPredictJoint)
+
+   Bases: :py:obj:`trieste.models.interfaces.ReparametrizationSampler`\ [\ :py:obj:`trieste.models.interfaces.SupportsPredictJoint`\ ]
+
+   This sampler employs the *reparameterization trick* to approximate batches of samples from a
+   :class:`ProbabilisticModel`\ 's predictive joint distribution as
+
+   .. math:: x \mapsto \mu(x) + \epsilon L(x)
+
+   where :math:`L` is the Cholesky factor s.t. :math:`LL^T` is the covariance, and
+   :math:`\epsilon \sim \mathcal N (0, 1)` is constant for a given sampler, thus ensuring samples
+   form a continuous curve.
+
+   :param sample_size: The number of samples for each batch of points. Must be positive.
+   :param model: The model to sample from.
+   :raise ValueError (or InvalidArgumentError): If ``sample_size`` is not positive.
+
+   .. py:method:: sample(self, at: trieste.types.TensorType, *, jitter: float = DEFAULTS.JITTER) -> trieste.types.TensorType
+
+      Return approximate samples from the `model` specified at :meth:`__init__`. Multiple calls to
+      :meth:`sample`, for any given :class:`BatchReparametrizationSampler` and ``at``, will
+      produce the exact same samples. Calls to :meth:`sample` on *different*
+      :class:`BatchReparametrizationSampler` instances will produce different samples.
+
+      :param at: Batches of query points at which to sample the predictive distribution, with
+          shape `[..., B, D]`, for batches of size `B` of points of dimension `D`. Must have a
+          consistent batch size across all calls to :meth:`sample` for any given
+          :class:`BatchReparametrizationSampler`.
+      :param jitter: The size of the jitter to use when stabilising the Cholesky decomposition of
+          the covariance matrix.
+      :return: The samples, of shape `[..., S, B, L]`, where `S` is the `sample_size`, `B` the
+          number of points per batch, and `L` the dimension of the model's predictive
+          distribution.
+      :raise ValueError (or InvalidArgumentError): If any of the following are true:
+          - ``at`` is a scalar.
+          - The batch size `B` of ``at`` is not positive.
+          - The batch size `B` of ``at`` differs from that of previous calls.
+          - ``jitter`` is negative.
+
+
+
+.. py:class:: SupportsGetKernelObservationNoiseInternalData
+
+   Bases: :py:obj:`trieste.models.interfaces.SupportsGetKernel`, :py:obj:`trieste.models.interfaces.SupportsGetObservationNoise`, :py:obj:`trieste.models.interfaces.SupportsInternalData`, :py:obj:`typing_extensions.Protocol`
+
+   A probabilistic model that supports get_kernel, get_observation noise
+   and get_internal_data.
+
+
+.. py:class:: RandomFourierFeatureTrajectorySampler(model: SupportsGetKernelObservationNoiseInternalData, num_features: int = 1000)
+
+   Bases: :py:obj:`trieste.models.interfaces.TrajectorySampler`\ [\ :py:obj:`SupportsGetKernelObservationNoiseInternalData`\ ]
+
+   This class builds functions that approximate a trajectory sampled from an underlying Gaussian
+   process model. For tractibility, the Gaussian process is approximated with a Bayesian
+   Linear model across a set of features sampled from the Fourier feature decomposition of
+   the model's kernel. See :cite:`hernandez2014predictive` for details.
+
+   Achieving consistency (ensuring that the same sample draw for all evalutions of a particular
+   trajectory function) for exact sample draws from a GP is prohibitively costly because it scales
+   cubically with the number of query points. However, finite feature representations can be
+   evaluated with constant cost regardless of the required number of queries.
+
+   In particular, we approximate the Gaussian processes' posterior samples as the finite feature
+   approximation
+
+   .. math:: \hat{f}(x) = \sum_{i=1}^m \phi_i(x)\theta_i
+
+   where :math:`\phi_i` are m Fourier features and :math:`\theta_i` are
+   feature weights sampled from a posterior distribution that depends on the feature values at the
+   model's datapoints.
+
+   Our implementation follows :cite:`hernandez2014predictive`, with our calculations
+   differing slightly depending on properties of the problem. In particular,  we used different
+   calculation strategies depending on the number of considered features m and the number
+   of data points n.
+
+   If :math:`m<n` then we follow Appendix A of :cite:`hernandez2014predictive` and calculate the
+   posterior distribution for :math:`\theta` following their Bayesian linear regression motivation,
+   i.e. the computation revolves around an O(m^3)  inversion of a design matrix.
+
+   If :math:`n<m` then we use the kernel trick to recast computation to revolve around an O(n^3)
+   inversion of a gram matrix. As well as being more efficient in early BO
+   steps (where :math:`n<m`), this second computation method allows much larger choices
+   of m (as required to approximate very flexible kernels).
+
+   :param sample_size: The desired number of samples.
+   :param model: The model to sample from.
+   :param num_features: The number of features used to approximate the kernel. We use a default
+       of 1000 as it typically perfoms well for a wide range of kernels. Note that very smooth
+       kernels (e.g. RBF) can be well-approximated with fewer features.
+   :raise ValueError: If ``dataset`` is empty.
+
+   .. py:method:: _prepare_theta_posterior_in_design_space(self) -> tensorflow_probability.distributions.MultivariateNormalTriL
+
+      Calculate the posterior of theta (the feature weights) in the design space. This
+      distribution is a Gaussian
+
+      .. math:: \theta \sim N(D^{-1}\Phi^Ty,D^{-1}\sigma^2)
+
+      where the [m,m] design matrix :math:`D=(\Phi^T\Phi + \sigma^2I_m)` is defined for
+      the [n,m] matrix of feature evaluations across the training data :math:`\Phi`
+      and observation noise variance :math:`\sigma^2`.
+
+
+   .. py:method:: _prepare_theta_posterior_in_gram_space(self) -> tensorflow_probability.distributions.MultivariateNormalTriL
+
+      Calculate the posterior of theta (the feature weights) in the gram space.
+
+       .. math:: \theta \sim N(\Phi^TG^{-1}y,I_m - \Phi^TG^{-1}\Phi)
+
+      where the [n,n] gram matrix :math:`G=(\Phi\Phi^T + \sigma^2I_n)` is defined for the [n,m]
+      matrix of feature evaluations across the training data :math:`\Phi` and
+      observation noise variance :math:`\sigma^2`.
+
+
+   .. py:method:: get_trajectory(self) -> trieste.models.interfaces.TrajectoryFunction
+
+      Generate an approximate function draw (trajectory) by sampling weights
+      and evaluating the feature functions.
+
+      :return: A trajectory function representing an approximate trajectory from the Gaussian
+          process, taking an input of shape `[N, D]` and returning shape `[N, 1]`
+
+
+   .. py:method:: update_trajectory(self, trajectory: trieste.models.interfaces.TrajectoryFunction) -> trieste.models.interfaces.TrajectoryFunction
+
+      Efficiently update a :const:`TrajectoryFunction` to reflect an update in its
+      underlying :class:`ProbabilisticModel` and resample accordingly.
+
+      For a :class:`RandomFourierFeatureTrajectorySampler`, updating the sampler
+      corresponds to resampling the feature functions (taking into account any
+      changed kernel parameters) and recalculating the weight distribution.
+
+      :param trajectory: The trajectory function to be resampled.
+      :return: The new resampled trajectory function.
+
+
+   .. py:method:: resample_trajectory(self, trajectory: trieste.models.interfaces.TrajectoryFunction) -> trieste.models.interfaces.TrajectoryFunction
+
+      Efficiently resample a :const:`TrajectoryFunction` in-place to avoid function retracing
+      with every new sample.
+
+      :param trajectory: The trajectory function to be resampled.
+      :return: The new resampled trajectory function.
+
+
+
+.. py:class:: fourier_feature_trajectory(feature_functions: gpflux.layers.basis_functions.fourier_features.RandomFourierFeaturesCosine, weight_distribution: tensorflow_probability.distributions.MultivariateNormalTriL)
+
+   Bases: :py:obj:`trieste.models.interfaces.TrajectoryFunctionClass`
+
+   An approximate sample from a Gaussian processes' posterior samples represented as a
+   finite weighted sum of features.
+
+   A trajectory is given by
+
+   .. math:: \hat{f}(x) = \sum_{i=1}^m \phi_i(x)\theta_i
+
+   where :math:`\phi_i` are m feature functions and :math:`\theta_i` are
+   feature weights sampled from a posterior distribution.
+
+   The number of trajectories (i.e. batch size) is determined from the first call of the
+   trajectory. In order to change the batch size, a new :class:`TrajectoryFunction` must be built.
+
+   :param feature_functions: Set of feature function.
+   :param weight_distribution: Distribution from which feature weights are to be sampled.
+
+   .. py:method:: __call__(self, x: trieste.types.TensorType) -> trieste.types.TensorType
+
+      Call trajectory function.
+
+
+   .. py:method:: resample(self) -> None
+
+      Efficiently resample in-place without retracing.
+
+
+   .. py:method:: update(self, weight_distribution: tensorflow_probability.distributions.MultivariateNormalTriL) -> None
+
+      Efficiently update the trajectory with a new weight distribution and resample its weights.
+
+      :param weight_distribution: new distribution from which feature weights are to be sampled.
+
+
+

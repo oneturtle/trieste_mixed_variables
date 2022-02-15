@@ -1,0 +1,72 @@
+:orphan:
+
+:py:mod:`trieste.models.gpflux.models`
+======================================
+
+.. py:module:: trieste.models.gpflux.models
+
+
+Module Contents
+---------------
+
+.. py:class:: DeepGaussianProcess(model: gpflux.models.DeepGP, optimizer: BatchOptimizer | None = None, continuous_optimisation: bool = True)
+
+   Bases: :py:obj:`trieste.models.gpflux.interface.GPfluxPredictor`, :py:obj:`trieste.models.interfaces.TrainableProbabilisticModel`
+
+   A :class:`TrainableProbabilisticModel` wrapper for a GPflux :class:`~gpflux.models.DeepGP` with
+   :class:`GPLayer` or :class:`LatentVariableLayer`: this class does not support e.g. keras layers.
+   We provide simple architectures that can be used with this class in the `architectures.py` file.
+   Note: the user should remember to set `tf.keras.backend.set_floatx()` with the desired value
+   (consistent with GPflow) so that dtype errors do not occur.
+
+   :param model: The underlying GPflux deep Gaussian process model.
+   :param optimizer: The optimizer configuration for training the model. Defaults to
+       :class:`~trieste.models.optimizer.BatchOptimizer` wrapper with
+       :class:`~tf.optimizers.Adam`.
+       This wrapper itself is not used, instead only its `optimizer` and `minimize_args` are
+       used. Its optimizer is used when compiling a Keras GPflux model and `minimize_args` is
+       a dictionary of arguments to be used in the Keras `fit` method. Defaults to
+       using 100 epochs, batch size 100, and verbose 0. See
+       https://keras.io/api/models/model_training_apis/#fit-method for a list of possible
+       arguments.
+   :param continuous_optimisation: if True (default), the optimizer will keep track of the
+       number of epochs across BO iterations and use this number as initial_epoch. This is
+       essential to allow monitoring of model training across BO iterations.
+
+   .. py:method:: model_gpflux(self) -> gpflux.models.DeepGP
+      :property:
+
+      The underlying GPflux model.
+
+
+   .. py:method:: model_keras(self) -> tensorflow.keras.Model
+      :property:
+
+      Returns the compiled Keras model for training.
+
+
+   .. py:method:: sample(self, query_points: trieste.types.TensorType, num_samples: int) -> trieste.types.TensorType
+
+      Return ``num_samples`` samples from the independent marginal distributions at
+      ``query_points``.
+
+      :param query_points: The points at which to sample, with shape [..., N, D].
+      :param num_samples: The number of samples at each point.
+      :return: The samples. For a predictive distribution with event shape E, this has shape
+          [..., S, N] + E, where S is the number of samples.
+
+
+   .. py:method:: update(self, dataset: trieste.data.Dataset) -> None
+
+      Update the model given the specified ``dataset``. Does not train the model.
+
+      :param dataset: The data with which to update the model.
+
+
+   .. py:method:: optimize(self, dataset: trieste.data.Dataset) -> None
+
+      Optimize the model with the specified `dataset`.
+      :param dataset: The data with which to optimize the `model`.
+
+
+
