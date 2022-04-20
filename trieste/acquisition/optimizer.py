@@ -19,7 +19,7 @@ This module contains functionality for optimizing
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import greenlet as gr
 import numpy as np
@@ -27,9 +27,10 @@ import scipy.optimize as spo
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from ..space import Box, DiscreteSearchSpace, SearchSpace, SearchSpaceType, TaggedProductSearchSpace
+from ..space import Box, Box_mixed, DiscreteSearchSpace, SearchSpace, SearchSpaceType, TaggedProductSearchSpace
 from ..types import TensorType
 from .interface import AcquisitionFunction
+from ..constraints import IConstraint, LinearInequalityConstraint, NonlinearInequalityConstraint
 
 NUM_SAMPLES_MIN: int = 5000
 """
@@ -92,7 +93,7 @@ def automatic_optimizer_selector(
     if isinstance(space, DiscreteSearchSpace):
         return optimize_discrete(space, target_func)
 
-    elif isinstance(space, (Box, TaggedProductSearchSpace)):
+    elif isinstance(space, (Box, TaggedProductSearchSpace, Box_mixed)):
         num_samples = tf.maximum(NUM_SAMPLES_MIN, NUM_SAMPLES_DIM * tf.shape(space.lower)[-1])
         num_runs = NUM_RUNS_DIM * tf.shape(space.lower)[-1]
         return generate_continuous_optimizer(
@@ -162,7 +163,7 @@ def generate_continuous_optimizer(
     num_optimization_runs: int = 10,
     num_recovery_runs: int = 10,
     optimizer_args: dict[str, Any] = dict(),
-) -> AcquisitionOptimizer[Box | TaggedProductSearchSpace]:
+) -> AcquisitionOptimizer[Box | TaggedProductSearchSpace | Box_mixed]:
     """
     Generate a gradient-based optimizer for :class:'Box' and :class:'TaggedProductSearchSpace'
     spaces and batches of size 1. In the case of a :class:'TaggedProductSearchSpace', We perform
@@ -208,7 +209,7 @@ def generate_continuous_optimizer(
         raise ValueError(f"num_recovery_runs must be zero or greater, got {num_recovery_runs}")
 
     def optimize_continuous(
-        space: Box | TaggedProductSearchSpace,
+        space: Box | TaggedProductSearchSpace | Box_mixed,
         target_func: Union[AcquisitionFunction, Tuple[AcquisitionFunction, int]],
     ) -> TensorType:
         """
@@ -313,6 +314,11 @@ def generate_continuous_optimizer(
                     even after {num_recovery_runs + num_optimization_runs} restarts.
                     """
             )
+        
+        # Optimization might not match any encoding exactly
+        # Round according to the type of variables of the design space
+        chosen_x = space.round_optimum(chosen_x)
+        fun_values = target_func(chosen_x)
 
         best_run_ids = tf.math.argmax(fun_values, axis=0)  # [V]
         chosen_points = tf.gather(
@@ -405,13 +411,21 @@ def _perform_parallel_continuous_optimization(
     np_batch_dy_dx = np.zeros(
         (num_optimization_runs, tf.shape(starting_points)[-1]), dtype=np.float64
     )
-
+    
     # Set up child greenlets
-    child_greenlets = [ScipyLbfgsBGreenlet() for _ in range(num_optimization_runs)]
-    vectorized_child_results: List[Union[spo.OptimizeResult, "np.ndarray[Any, Any]"]] = [
-        gr.switch(vectorized_starting_points[i].numpy(), bounds[i], optimizer_args)
-        for i, gr in enumerate(child_greenlets)
-    ]
+    if hasattr(space, "known_constraints") and space.known_constraints is not None:
+        known_constraints = [space.known_constraints]*len(bounds)
+        child_greenlets = [ScipyTrustconstrBGreenlet() for _ in range(num_optimization_runs)]
+        vectorized_child_results: List[Union[spo.OptimizeResult, np.ndarray]] = [
+            gr.switch(vectorized_starting_points[i].numpy(), bounds[i], known_constraints[i], optimizer_args)
+            for i, gr in enumerate(child_greenlets)
+        ]
+    else:
+        child_greenlets = [ScipyLbfgsBGreenlet() for _ in range(num_optimization_runs)]
+        vectorized_child_results: List[Union[spo.OptimizeResult, np.ndarray]] = [
+            gr.switch(vectorized_starting_points[i].numpy(), bounds[i], optimizer_args)
+            for i, gr in enumerate(child_greenlets)
+        ]
 
     while True:
         all_done = True
@@ -436,15 +450,14 @@ def _perform_parallel_continuous_optimization(
                 continue
             vectorized_child_results[i] = greenlet.switch(np_batch_y[i], np_batch_dy_dx[i, :])
 
-    final_vectorized_child_results: List[spo.OptimizeResult] = vectorized_child_results
     vectorized_successes = tf.constant(
-        [result.success for result in final_vectorized_child_results]
+        [result.success for result in vectorized_child_results]
     )  # [num_optimization_runs]
     vectorized_fun_values = tf.constant(
-        [-result.fun for result in final_vectorized_child_results], dtype=tf_dtype
+        [-result.fun for result in vectorized_child_results], dtype=tf_dtype
     )  # [num_optimization_runs]
     vectorized_chosen_x = tf.constant(
-        [result.x for result in final_vectorized_child_results], dtype=tf_dtype
+        [result.x for result in vectorized_child_results], dtype=tf_dtype
     )  # [num_optimization_runs, D]
 
     successes = tf.reshape(vectorized_successes, [-1, V])  # [num_optimization_runs, V]
@@ -463,19 +476,15 @@ class ScipyLbfgsBGreenlet(gr.greenlet):  # type: ignore[misc]
     """
 
     def run(
-        self,
-        start: "np.ndarray[Any, Any]",
-        bounds: spo.Bounds,
-        optimizer_args: dict[str, Any] = dict(),
+        self, start: np.ndarray, bounds: spo.Bounds, optimizer_args: dict[str, Any] = dict()
     ) -> spo.OptimizeResult:
         cache_x = start + 1  # Any value different from `start`.
-        cache_y: Optional["np.ndarray[Any, Any]"] = None
-        cache_dy_dx: Optional["np.ndarray[Any, Any]"] = None
+        cache_y: Optional[np.ndarray] = None
+        cache_dy_dx: Optional[np.ndarray] = None
 
         def value_and_gradient(
-            x: "np.ndarray[Any, Any]",
-        ) -> Tuple["np.ndarray[Any, Any]", "np.ndarray[Any, Any]"]:
-            # Collect function evaluations from parent greenlet
+            x: np.ndarray,
+        ) -> Tuple[np.ndarray, np.ndarray]:  # Collect function evaluations from parent greenlet
             nonlocal cache_x
             nonlocal cache_y
             nonlocal cache_dy_dx
@@ -485,7 +494,7 @@ class ScipyLbfgsBGreenlet(gr.greenlet):  # type: ignore[misc]
                 # Send `x` to parent greenlet, which will evaluate all `x`s in a batch.
                 cache_y, cache_dy_dx = self.parent.switch(cache_x)
 
-            return cast("np.ndarray[Any, Any]", cache_y), cast("np.ndarray[Any, Any]", cache_dy_dx)
+            return cache_y, cache_dy_dx
 
         return spo.minimize(
             lambda x: value_and_gradient(x)[0],
@@ -496,6 +505,75 @@ class ScipyLbfgsBGreenlet(gr.greenlet):  # type: ignore[misc]
             **optimizer_args,
         )
 
+class ScipyTrustconstrBGreenlet(gr.greenlet):  # type: ignore[misc]
+    """
+    Worker greenlet that runs a single Scipy trust-constr. Each greenlet performs all the trust-constr
+    update steps required for an individual optimization. However, the evaluation
+    of our acquisition function (and its gradients) is delegated back to the main Tensorflow
+    process (the parent greenlet) where evaluations can be made efficiently in parallel.
+    """
+
+    def run(
+        self, start: np.ndarray, bounds: spo.Bounds, known_constraints, optimizer_args: dict[str, Any] = dict(),
+    ) -> spo.OptimizeResult:
+        cache_x = start + 1  # Any value different from `start`.
+        cache_y: Optional[np.ndarray] = None
+        cache_dy_dx: Optional[np.ndarray] = None
+
+        def value_and_gradient(
+            x: np.ndarray,
+        ) -> Tuple[np.ndarray, np.ndarray]:  # Collect function evaluations from parent greenlet
+            nonlocal cache_x
+            nonlocal cache_y
+            nonlocal cache_dy_dx
+
+            if not (cache_x == x).all():
+                cache_x[:] = x  # Copy the value of `x`. DO NOT copy the reference.
+                # Send `x` to parent greenlet, which will evaluate all `x`s in a batch.
+                cache_y, cache_dy_dx = self.parent.switch(cache_x)
+
+            return cache_y, cache_dy_dx
+        
+        known_constraints = _get_scipy_constraints(known_constraints)
+        return spo.minimize(
+            lambda x: value_and_gradient(x)[0],
+            start,
+            jac=lambda x: value_and_gradient(x)[1],
+            method="trust-constr",
+            bounds=bounds,
+            constraints=known_constraints,
+            hess='2-point',
+            **optimizer_args,
+        )
+
+def _get_scipy_constraints(constraint_list: List[IConstraint]) -> List:
+    """
+    Converts list of emukit constraint objects to list of scipy constraint objects
+
+    :param constraint_list: List of Emukit constraint objects
+    :return: List of scipy constraint objects
+    """
+
+    scipy_constraints = []
+    for constraint in constraint_list:
+        if isinstance(constraint, NonlinearInequalityConstraint):
+            if constraint.jacobian_fun is None:
+                # No jacobian supplied -> tell scipy to use finite difference method
+                jacobian = '2-point'
+            else:
+                # Jacobian is supplied -> tell scipy to use it
+                jacobian = constraint.jacobian_fun
+
+            scipy_constraints.append(
+                spo.NonlinearConstraint(constraint.fun, constraint.lower_bound, constraint.upper_bound,
+                                                   jacobian))
+        elif isinstance(constraint, LinearInequalityConstraint):
+            scipy_constraints.append(spo.LinearConstraint(constraint.constraint_matrix,
+                                                                     constraint.lower_bound,
+                                                                     constraint.upper_bound))
+        else:
+            raise ValueError('Constraint type {} not recognised'.format(type(constraint)))
+    return scipy_constraints
 
 def get_bounds_of_box_relaxation_around_point(
     space: TaggedProductSearchSpace, current_point: TensorType

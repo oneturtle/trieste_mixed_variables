@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-This file contains builders for Keras models supported in Trieste. We found the default
-configurations used here to work well in most situation, but they should not be taken as
-universally good solutions.
-"""
+""" This module contains functions that facilitate building neural network models. """
 
 from __future__ import annotations
 
@@ -30,10 +26,10 @@ from .utils import get_tensor_spec_from_data
 
 
 def build_vanilla_keras_ensemble(
-    data: Dataset,
+    dataset: Dataset,
     ensemble_size: int = 5,
     num_hidden_layers: int = 2,
-    units: int = 25,
+    units: int = 50,
     activation: Union[str, tf.keras.layers.Activation] = "relu",
     independent_normal: bool = False,
 ) -> KerasEnsemble:
@@ -44,8 +40,7 @@ def build_vanilla_keras_ensemble(
 
     Default ensemble size and activation function seem to work well in practice, in regression type
     of problems at least. Number of hidden layers and units per layer should be modified according
-    to the dataset size and complexity of the function - the default values seem to work well
-    for small datasets common in Bayesian optimization. Using the independent normal is relevant
+    to the dataset size and complexity of the function. Using the independent normal is relevant
     only if one is modelling multiple output variables, as it simplifies the distribution by
     ignoring correlations between outputs.
 
@@ -62,7 +57,7 @@ def build_vanilla_keras_ensemble(
         between outputs are learned as well.
     :return: Keras ensemble model.
     """
-    input_tensor_spec, output_tensor_spec = get_tensor_spec_from_data(data)
+    input_tensor_spec, output_tensor_spec = get_tensor_spec_from_data(dataset)
 
     hidden_layer_args = []
     for i in range(num_hidden_layers):

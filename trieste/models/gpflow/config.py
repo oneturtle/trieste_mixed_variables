@@ -20,18 +20,13 @@ from gpflow.models import GPR, SGPR, SVGP, VGP
 
 from ..config import ModelRegistry
 from ..interfaces import TrainableProbabilisticModel
-from .models import (
-    GaussianProcessRegression,
-    SparseGaussianProcessRegression,
-    SparseVariational,
-    VariationalGaussianProcess,
-)
+from .models import GaussianProcessRegression, SparseVariational, VariationalGaussianProcess
 
 # Here we list all the GPflow models currently supported by model interfaces
 # and optimizers, and register them for usage with ModelConfig.
 _SUPPORTED_MODELS: Dict[Type[Any], Type[TrainableProbabilisticModel]] = {
     GPR: GaussianProcessRegression,
-    SGPR: SparseGaussianProcessRegression,
+    SGPR: GaussianProcessRegression,
     VGP: VariationalGaussianProcess,
     SVGP: SparseVariational,
 }

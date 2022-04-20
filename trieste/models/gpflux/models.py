@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import tensorflow as tf
 from gpflow.inducing_variables import InducingPoints
 from gpflux.layers import GPLayer, LatentVariableLayer
@@ -21,25 +23,13 @@ from gpflux.models import DeepGP
 
 from ...data import Dataset
 from ...types import TensorType
-from ..interfaces import (
-    HasReparamSampler,
-    HasTrajectorySampler,
-    ReparametrizationSampler,
-    TrainableProbabilisticModel,
-    TrajectorySampler,
-)
-from ..optimizer import KerasOptimizer
+from ..interfaces import TrainableProbabilisticModel
+from ..optimizer import BatchOptimizer
 from .interface import GPfluxPredictor
-from .sampler import (
-    DeepGaussianProcessReparamSampler,
-    DeepGaussianProcessTrajectorySampler,
-    sample_dgp,
-)
+from .utils import sample_dgp
 
 
-class DeepGaussianProcess(
-    GPfluxPredictor, TrainableProbabilisticModel, HasReparamSampler, HasTrajectorySampler
-):
+class DeepGaussianProcess(GPfluxPredictor, TrainableProbabilisticModel):
     """
     A :class:`TrainableProbabilisticModel` wrapper for a GPflux :class:`~gpflux.models.DeepGP` with
     :class:`GPLayer` or :class:`LatentVariableLayer`: this class does not support e.g. keras layers.
@@ -51,17 +41,18 @@ class DeepGaussianProcess(
     def __init__(
         self,
         model: DeepGP,
-        optimizer: KerasOptimizer | None = None,
+        optimizer: BatchOptimizer | None = None,
         continuous_optimisation: bool = True,
     ):
         """
         :param model: The underlying GPflux deep Gaussian process model.
         :param optimizer: The optimizer configuration for training the model. Defaults to
-            :class:`~trieste.models.optimizer.KerasOptimizer` wrapper with
-            :class:`~tf.optimizers.Adam` optimizer. The ``optimizer`` argument to the wrapper is
-            used when compiling the model and ``fit_args`` is a dictionary of arguments to be used
-            in the Keras ``fit`` method. Defaults to 400 epochs, batch size of 1000, and verbose 0.
-            A custom callback that reduces the optimizer learning rate is used as well. See
+            :class:`~trieste.models.optimizer.BatchOptimizer` wrapper with
+            :class:`~tf.optimizers.Adam`.
+            This wrapper itself is not used, instead only its `optimizer` and `minimize_args` are
+            used. Its optimizer is used when compiling a Keras GPflux model and `minimize_args` is
+            a dictionary of arguments to be used in the Keras `fit` method. Defaults to
+            using 100 epochs, batch size 100, and verbose 0. See
             https://keras.io/api/models/model_training_apis/#fit-method for a list of possible
             arguments.
         :param continuous_optimisation: if True (default), the optimizer will keep track of the
@@ -86,21 +77,14 @@ class DeepGaussianProcess(
 
         self.original_lr = self.optimizer.optimizer.lr.numpy()
 
-        epochs = 400
-
-        def scheduler(epoch: int, lr: float) -> float:
-            if epoch == epochs // 2:
-                return lr * 0.1
-            else:
-                return lr
-
-        if not self.optimizer.fit_args:
-            self.optimizer.fit_args = {
+        if not self.optimizer.minimize_args:
+            self._fit_args: Dict[str, Any] = {
                 "verbose": 0,
-                "epochs": epochs,
-                "batch_size": 1000,
-                "callbacks": [tf.keras.callbacks.LearningRateScheduler(scheduler)],
+                "epochs": 100,
+                "batch_size": 100,
             }
+        else:
+            self._fit_args = self.optimizer.minimize_args
 
         self._model_gpflux = model
 
@@ -126,24 +110,6 @@ class DeepGaussianProcess(
         for _ in range(num_samples):
             samples.append(sample_dgp(self.model_gpflux)(query_points))
         return tf.stack(samples)
-
-    def reparam_sampler(self, num_samples: int) -> ReparametrizationSampler[GPfluxPredictor]:
-        """
-        Return a reparametrization sampler for a :class:`DeepGaussianProcess` model.
-
-        :param num_samples: The number of samples to obtain.
-        :return: The reparametrization sampler.
-        """
-        return DeepGaussianProcessReparamSampler(num_samples, self)
-
-    def trajectory_sampler(self) -> TrajectorySampler[GPfluxPredictor]:
-        """
-        Return a trajectory sampler. For :class:`DeepGaussianProcess`, we build
-        trajectories using the GPflux default sampler.
-
-        :return: The trajectory sampler.
-        """
-        return DeepGaussianProcessTrajectorySampler(self)
 
     def update(self, dataset: Dataset) -> None:
         inputs = dataset.query_points
@@ -187,7 +153,7 @@ class DeepGaussianProcess(
         Optimize the model with the specified `dataset`.
         :param dataset: The data with which to optimize the `model`.
         """
-        fit_args = dict(self.optimizer.fit_args)
+        fit_args = dict(self._fit_args)
 
         # Tell optimizer how many epochs have been used before: the optimizer will "continue"
         # optimization across multiple BO iterations rather than start fresh at each iteration.

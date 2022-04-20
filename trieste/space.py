@@ -13,11 +13,15 @@
 # limitations under the License.
 """ This module contains implementations of various types of search space. """
 from __future__ import annotations
+from lib2to3.pytree import convert
 
 import operator
 from abc import ABC, abstractmethod
 from functools import reduce
 from typing import Optional, Sequence, TypeVar, overload
+from markupsafe import string
+from numpy import dtype, zeros
+import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -53,7 +57,7 @@ class SearchSpace(ABC):
 
     @property
     @abstractmethod
-    def dimension(self) -> TensorType:
+    def dimension(self) -> int:
         """The number of inputs in this search space."""
 
     @property
@@ -67,32 +71,11 @@ class SearchSpace(ABC):
         """The highest value taken by each search space dimension."""
 
     @abstractmethod
-    def product(self: SearchSpaceType, other: SearchSpaceType) -> SearchSpaceType:
+    def __mul__(self: SearchSpaceType, other: SearchSpaceType) -> SearchSpaceType:
         """
         :param other: A search space of the same type as this search space.
         :return: The Cartesian product of this search space with the ``other``.
         """
-
-    @overload
-    def __mul__(self: SearchSpaceType, other: SearchSpaceType) -> SearchSpaceType:
-        ...
-
-    @overload
-    def __mul__(self: SearchSpaceType, other: SearchSpace) -> SearchSpace:  # type: ignore[misc]
-        # mypy complains that this is superfluous, but it seems to use it fine to infer
-        # that Box * Box = Box, while Box * Discrete = SearchSpace.
-        ...
-
-    def __mul__(self, other: SearchSpace) -> SearchSpace:
-        """
-        :param other: A search space.
-        :return: The Cartesian product of this search space with the ``other``.
-            If both spaces are of the same type then this calls the :meth:`product` method.
-            Otherwise, it generates a :class:`TaggedProductSearchSpace`.
-        """
-        if isinstance(other, type(self)):
-            return self.product(other)
-        return TaggedProductSearchSpace((self, other))
 
     def __pow__(self: SearchSpaceType, other: int) -> SearchSpaceType:
         """
@@ -107,21 +90,6 @@ class SearchSpace(ABC):
         """
         tf.debugging.assert_positive(other, message="Exponent must be strictly positive")
         return reduce(operator.mul, [self] * other)
-
-    def discretize(self, num_samples: int) -> DiscreteSearchSpace:
-        """
-        :param num_samples: The number of points in the :class:`DiscreteSearchSpace`.
-        :return: A discrete search space consisting of ``num_samples`` points sampled uniformly from
-            this search space.
-        """
-        return DiscreteSearchSpace(points=self.sample(num_samples))
-
-    @abstractmethod
-    def __eq__(self, other: object) -> bool:
-        """
-        :param other: A search space.
-        :return: Whether the search space is identical to this one.
-        """
 
 
 class DiscreteSearchSpace(SearchSpace):
@@ -168,7 +136,7 @@ class DiscreteSearchSpace(SearchSpace):
         return self._points
 
     @property
-    def dimension(self) -> TensorType:
+    def dimension(self) -> int:
         """The number of inputs in this search space."""
         return self._dimension
 
@@ -190,7 +158,7 @@ class DiscreteSearchSpace(SearchSpace):
             )
             return tf.gather(self.points, sampled_indices)[0, :, :]  # [num_samples, D]
 
-    def product(self, other: DiscreteSearchSpace) -> DiscreteSearchSpace:
+    def __mul__(self, other: DiscreteSearchSpace) -> DiscreteSearchSpace:
         r"""
         Return the Cartesian product of the two :class:`DiscreteSearchSpace`\ s. For example:
 
@@ -216,15 +184,6 @@ class DiscreteSearchSpace(SearchSpace):
         cartesian_product = tf.concat([tile_self, tile_other], axis=2)
         product_space_dimension = self.points.shape[-1] + other.points.shape[-1]
         return DiscreteSearchSpace(tf.reshape(cartesian_product, [-1, product_space_dimension]))
-
-    def __eq__(self, other: object) -> bool:
-        """
-        :param other: A search space.
-        :return: Whether the search space is identical to this one.
-        """
-        if not isinstance(other, DiscreteSearchSpace):
-            return NotImplemented
-        return bool(tf.reduce_all(tf.sort(self.points, 0) == tf.sort(other.points, 0)))
 
     def __deepcopy__(self, memo: dict[int, object]) -> DiscreteSearchSpace:
         return self
@@ -258,6 +217,7 @@ class Box(SearchSpace):
             and if a tensor, must have float type.
         :param upper: The upper (inclusive) bounds of the box. Must have shape [D] for positive D,
             and if a tensor, must have float type.
+        :param varTypes: The types of variables, such as "Continue" or "Discrete".
         :raise ValueError (or tf.errors.InvalidArgumentError): If any of the following are true:
 
             - ``lower`` and ``upper`` have invalid shapes.
@@ -287,17 +247,17 @@ class Box(SearchSpace):
         return f"Box({self._lower!r}, {self._upper!r})"
 
     @property
-    def lower(self) -> tf.Tensor:
+    def lower(self) -> TensorType:
         """The lower bounds of the box."""
         return self._lower
 
     @property
-    def upper(self) -> tf.Tensor:
+    def upper(self) -> TensorType:
         """The upper bounds of the box."""
         return self._upper
 
     @property
-    def dimension(self) -> TensorType:
+    def dimension(self) -> int:
         """The number of inputs in this search space."""
         return self._dimension
 
@@ -381,7 +341,15 @@ class Box(SearchSpace):
             dim=dim, num_results=num_samples, dtype=self._lower.dtype, skip=skip
         ) + self._lower
 
-    def product(self, other: Box) -> Box:
+    def discretize(self, num_samples: int) -> DiscreteSearchSpace:
+        """
+        :param num_samples: The number of points in the :class:`DiscreteSearchSpace`.
+        :return: A discrete search space consisting of ``num_samples`` points sampled uniformly from
+            this :class:`Box`.
+        """
+        return DiscreteSearchSpace(points=self.sample(num_samples))
+
+    def __mul__(self, other: Box) -> Box:
         r"""
         Return the Cartesian product of the two :class:`Box`\ es (concatenating their respective
         lower and upper bounds). For example:
@@ -406,17 +374,6 @@ class Box(SearchSpace):
         product_upper_bound = tf.concat([self._upper, other.upper], axis=-1)
 
         return Box(product_lower_bound, product_upper_bound)
-
-    def __eq__(self, other: object) -> bool:
-        """
-        :param other: A search space.
-        :return: Whether the search space is identical to this one.
-        """
-        if not isinstance(other, Box):
-            return NotImplemented
-        return bool(
-            tf.reduce_all(self.lower == other.lower) and tf.reduce_all(self.upper == other.upper)
-        )
 
     def __deepcopy__(self, memo: dict[int, object]) -> Box:
         return self
@@ -504,9 +461,9 @@ class TaggedProductSearchSpace(SearchSpace):
         return self._tags
 
     @property
-    def dimension(self) -> TensorType:
+    def dimension(self) -> int:
         """The number of inputs in this product search space."""
-        return self._dimension
+        return int(self._dimension)
 
     def get_subspace(self, tag: str) -> SearchSpace:
         """
@@ -598,7 +555,15 @@ class TaggedProductSearchSpace(SearchSpace):
         subspace_samples = [self._spaces[tag].sample(num_samples) for tag in self._tags]
         return tf.concat(subspace_samples, -1)
 
-    def product(self, other: TaggedProductSearchSpace) -> TaggedProductSearchSpace:
+    def discretize(self, num_samples: int) -> DiscreteSearchSpace:
+        """
+        :param num_samples: The number of points in the :class:`DiscreteSearchSpace`.
+        :return: A discrete search space consisting of ``num_samples`` points sampled
+            uniformly across the space.
+        """
+        return DiscreteSearchSpace(points=self.sample(num_samples))
+
+    def __mul__(self, other: SearchSpace) -> TaggedProductSearchSpace:
         r"""
         Return the Cartesian product of the two :class:`TaggedProductSearchSpace`\ s,
         building a tree of :class:`TaggedProductSearchSpace`\ s.
@@ -608,14 +573,423 @@ class TaggedProductSearchSpace(SearchSpace):
         """
         return TaggedProductSearchSpace(spaces=[self, other])
 
-    def __eq__(self, other: object) -> bool:
-        """
-        :param other: A search space.
-        :return: Whether the search space is identical to this one.
-        """
-        if not isinstance(other, TaggedProductSearchSpace):
-            return NotImplemented
-        return self._tags == other._tags and self._spaces == other._spaces
-
     def __deepcopy__(self, memo: dict[int, object]) -> TaggedProductSearchSpace:
         return self
+
+
+class Box_mixed(SearchSpace):
+    r"""
+    Continuous or Discretes :class:`SearchSpace` representing a :math:`D`-dimensional box in
+    :math:`\mathbb{R}^D`. Mathematically it is equivalent to the Cartesian product of :math:`D`
+    closed bounded intervals in :math:`\mathbb{R}`.
+    """
+
+    @overload
+    def __init__(self, lower: Sequence[float], upper: Sequence[float], varTypes: Sequence[str], known_constraints=None):
+        ...
+
+    @overload
+    def __init__(self, lower: TensorType, upper: TensorType, varTypes: TensorType, known_constraints=None):
+        ...
+
+    def __init__(
+        self,
+        lower: Sequence[float] | TensorType,
+        upper: Sequence[float] | TensorType,
+        varTypes: Sequence[str] | TensorType,
+        known_constraints = None,
+    ):
+        r"""
+        If ``lower`` and ``upper`` are `Sequence`\ s of floats (such as lists or tuples),
+        they will be converted to tensors of dtype `tf.float64`.
+
+        :param lower: The lower (inclusive) bounds of the box. Must have shape [D] for positive D,
+            and if a tensor, must have float type.
+        :param upper: The upper (inclusive) bounds of the box. Must have shape [D] for positive D,
+            and if a tensor, must have float type.
+        :param varTypes: The types of variables, such as "Continuous" or "Discrete".
+        :param known_constraints: The constraints which can be listed explicity. A list of dict,
+            such as known_constraints = [{'type': 'ineq', 'fun': '-x[:,1] -.5 + abs(x[:,0]) - np.sqrt(1-x[:,0]**2)'},
+                                        {'type': 'eq', 'fun': 'x[:,1] +.5 - abs(x[:,0]) - np.sqrt(1-x[:,0]**2)'}]
+        :raise ValueError (or tf.errors.InvalidArgumentError): If any of the following are true:
+
+            - ``lower`` and ``upper`` have invalid shapes.
+            - ``lower`` and ``upper`` do not have the same floating point type.
+            - ``upper`` is not greater than ``lower`` across all dimensions.
+        """
+        tf.debugging.assert_shapes([(lower, ["D"]), (upper, ["D"]), (varTypes, ["D"])])
+        tf.assert_rank(lower, 1)
+        tf.assert_rank(upper, 1)
+        tf.assert_rank(varTypes, 1)
+        
+        
+        if isinstance(lower, Sequence):
+            self._lower = tf.constant(lower, dtype=tf.float64)
+            self._upper = tf.constant(upper, dtype=tf.float64)
+            self._varTypes = tf.constant(varTypes, dtype=tf.string)
+        else:
+            self._lower = tf.convert_to_tensor(lower)
+            self._upper = tf.convert_to_tensor(upper)
+            self._varTypes = tf.convert_to_tensor(varTypes)
+
+            tf.debugging.assert_same_float_dtype([self._lower, self._upper])
+
+        tf.debugging.assert_less(self._lower, self._upper)
+
+        self._dimension = tf.shape(self._upper)[-1]
+
+        self.known_constraints = known_constraints
+
+    def __repr__(self) -> str:
+        """"""
+        return f"Box({self._lower!r}, {self._upper!r}, {self._varTypes!r})"
+
+    @property
+    def lower(self) -> TensorType:
+        """The lower bounds of the box."""
+        return self._lower
+
+    @property
+    def upper(self) -> TensorType:
+        """The upper bounds of the box."""
+        return self._upper
+    
+    @property
+    def varTypes(self) -> TensorType:
+        """The types of variables."""
+        return self._varTypes
+
+    @property
+    def dimension(self) -> int:
+        """The number of inputs in this search space."""
+        return self._dimension
+
+    def __contains__(self, value: TensorType) -> bool | TensorType:
+        """
+        Return `True` if ``value`` is a member of this search space, else `False`. A point is a
+        member if all of its coordinates lie in the closed intervals bounded by the lower and upper
+        bounds.
+
+        :param value: A point to check for membership of this :class:`SearchSpace`.
+        :return: `True` if ``value`` is a member of this search space, else `False`. May return a
+            scalar boolean `TensorType` instead of the `bool` itself.
+        :raise ValueError (or tf.errors.InvalidArgumentError): If ``value`` has a different
+            dimensionality from the search space.
+        """
+
+        tf.debugging.assert_equal(
+            shapes_equal(value, self._lower),
+            True,
+            message=f"""
+                Dimensionality mismatch: space is {self._lower}, value is {tf.shape(value)}
+                """,
+        )
+
+        return tf.reduce_all(value >= self._lower) and tf.reduce_all(value <= self._upper)
+
+    def sample(self, num_samples: int) -> TensorType:
+        """
+        Sample randomly from the space with known_constraints.
+
+        :param num_samples: The number of points to sample from this search space.
+        :return: ``num_samples`` i.i.d. random points, sampled uniformly,
+            from this search space with shape '[num_samples, D]' , where D is the search space
+            dimension.
+        """
+        tf.debugging.assert_non_negative(num_samples)
+
+        dim = tf.shape(self._lower)[-1]
+        samples = np.empty((num_samples, dim))
+        
+        if self.has_known_constraints():
+            samples = self.get_samples_with_constraints(num_samples)
+        else:
+            samples = self.get_samples_without_constraints(num_samples)
+        
+        #return samples
+        return tf.Variable(samples)
+    
+    def smaple_latin(self, num_samples: int, criterion: str = 'center'):
+        """
+        Latin experiment design for initial experiment design.
+        Uses random design for non-continuous variables, and latin hypercube for continuous ones
+        
+        :param num_samples: Number of samples to generate
+        :param criterion: For details of the effect of this parameter, please refer to pyDOE.lhs documentation
+                          Default: 'center'
+        :returns: Generated samples
+        """
+        tf.debugging.assert_non_negative(num_samples)
+
+        dim = tf.shape(self._lower)[-1]
+        samples = np.empty((num_samples, dim))
+
+        for (idx, var) in enumerate(self._varTypes):
+            if var=="Discrete" or var=="discrete" :
+                sample_var = np.atleast_2d(np.random.choice(list(np.arange(self._lower[idx], self._upper[idx]+1)), num_samples))
+                samples[:,idx] = sample_var.flatten()
+        
+        if self.has_continuous():
+            bounds = self.get_continuous_bounds()
+            lower_bound = np.asarray(bounds)[:,0].reshape(1, len(bounds))
+            upper_bound = np.asarray(bounds)[:,1].reshape(1, len(bounds))
+            diff = upper_bound - lower_bound
+
+            from pyDOE import lhs
+            X_design_aux = lhs(len(bounds), num_samples, criterion=criterion)
+            I = np.ones((X_design_aux.shape[0], 1))
+            X_design = np.dot(I, lower_bound) + X_design_aux * np.dot(I, diff)
+
+            samples[:, self.get_continuous_dims()] = X_design
+        
+        #return samples
+        return tf.Variable(samples)
+
+    def sample_halton(self, num_samples: int, seed: Optional[int] = None) -> TensorType:
+        """
+        Sample from the space using a Halton sequence. The resulting samples are guaranteed to be
+        diverse and are reproducible by using the same choice of ``seed``.
+
+        :param num_samples: The number of points to sample from this search space.
+        :param seed: Random seed for the halton sequence
+        :return: ``num_samples`` of points, using halton sequence with shape '[num_samples, D]' ,
+            where D is the search space dimension.
+        """
+
+        tf.debugging.assert_non_negative(num_samples)
+        if num_samples == 0:
+            return tf.constant([])
+        if seed is not None:  # ensure reproducibility
+            tf.random.set_seed(seed)
+        dim = tf.shape(self._lower)[-1]
+        return (self._upper - self._lower) * tfp.mcmc.sample_halton_sequence(
+            dim=dim, num_results=num_samples, dtype=self._lower.dtype, seed=seed
+        ) + self._lower
+
+    def sample_sobol(self, num_samples: int, skip: Optional[int] = None) -> TensorType:
+        """
+        Sample a diverse set from the space using a Sobol sequence.
+        If ``skip`` is specified, then the resulting samples are reproducible.
+
+        :param num_samples: The number of points to sample from this search space.
+        :param skip: The number of initial points of the Sobol sequence to skip
+        :return: ``num_samples`` of points, using sobol sequence with shape '[num_samples, D]' ,
+            where D is the search space dimension.
+        """
+        tf.debugging.assert_non_negative(num_samples)
+        if num_samples == 0:
+            return tf.constant([])
+        if skip is None:  # generate random skip
+            skip = tf.random.uniform([1], maxval=2 ** 16, dtype=tf.int32)[0]
+        dim = tf.shape(self._lower)[-1]
+        return (self._upper - self._lower) * tf.math.sobol_sample(
+            dim=dim, num_results=num_samples, dtype=self._lower.dtype, skip=skip
+        ) + self._lower
+
+    def discretize(self, num_samples: int) -> DiscreteSearchSpace:
+        """
+        :param num_samples: The number of points in the :class:`DiscreteSearchSpace`.
+        :return: A discrete search space consisting of ``num_samples`` points sampled uniformly from
+            this :class:`Box`.
+        """
+        return DiscreteSearchSpace(points=self.sample(num_samples))
+
+    def __mul__(self, other: Box) -> Box:
+        r"""
+        Return the Cartesian product of the two :class:`Box`\ es (concatenating their respective
+        lower and upper bounds). For example:
+
+            >>> unit_interval = Box([0.0], [1.0])
+            >>> square_at_origin = Box([-2.0, -2.0], [2.0, 2.0])
+            >>> new_box = unit_interval * square_at_origin
+            >>> new_box.lower.numpy()
+            array([ 0., -2., -2.])
+            >>> new_box.upper.numpy()
+            array([1., 2., 2.])
+
+        :param other: A :class:`Box` with bounds of the same type as this :class:`Box`.
+        :return: The Cartesian product of the two :class:`Box`\ es.
+        :raise TypeError: If the bounds of one :class:`Box` have different dtypes to those of
+            the other :class:`Box`.
+        """
+        if self.lower.dtype is not other.lower.dtype:
+            return NotImplemented
+
+        product_lower_bound = tf.concat([self._lower, other.lower], axis=-1)
+        product_upper_bound = tf.concat([self._upper, other.upper], axis=-1)
+
+        return Box(product_lower_bound, product_upper_bound)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> Box:
+        return self
+
+    def get_samples_with_constraints(self, num_samples):
+        """
+        Draw random samples and only save those that satisfy constraints
+        Finish when required number of samples is generated
+        """
+        samples = np.empty((0, self._dimension))
+
+        while samples.shape[0] < num_samples:
+            domain_samples = self.get_samples_without_constraints(num_samples)
+            valid_indices = (self.indicator_constraints(domain_samples) == 1).flatten()
+            if sum(valid_indices) > 0:
+                valid_samples = domain_samples[valid_indices,:]
+                samples = np.vstack((samples,valid_samples))
+
+        return samples[0:num_samples,:]
+    
+    def fill_noncontinous_variables(self, samples):
+        """
+        Fill sample values to non-continuous variables in place
+        """
+        num_samples = samples.shape[0]
+        for (idx, var) in enumerate(self._varTypes):
+            if var=="Discrete" or var=="discrete" :
+                sample_var = np.atleast_2d(np.random.choice(list(np.arange(self._lower[idx], self._upper[idx]+1)), num_samples))
+                samples[:,idx] = sample_var.flatten()
+    
+    def get_samples_without_constraints(self, num_samples):
+        samples = np.empty((num_samples, self._dimension))
+
+        self.fill_noncontinous_variables(samples)
+
+        if self.has_continuous():
+            X_design = self.samples_multidimensional_uniform(self.get_continuous_bounds(), num_samples)
+            samples[:, self.get_continuous_dims()] = X_design
+
+        return samples
+    
+    def samples_multidimensional_uniform(self, bounds, points_count):
+        """
+        Generates a multidimensional grid uniformly distributed.
+        :param bounds: tuple defining the box constraints.
+        :points_count: number of data points to generate.
+        """
+        dim = len(bounds)
+        Z_rand = np.zeros(shape=(points_count, dim))
+        for k in range(0,dim):
+            Z_rand[:,k] = np.random.uniform(low=bounds[k][0], high=bounds[k][1], size=points_count)
+        return Z_rand
+
+    def indicator_constraints(self,x):
+        """
+        Returns array of ones and zeros indicating if x is within the constraints
+        """
+        x = np.atleast_2d(x)    #[num_samples, D]
+        I_x = np.ones((x.shape[0],1))
+        if self.known_constraints is not None:
+            for d in self.known_constraints:
+                try:
+                    #exec('known_constraint = lambda x:' + d['known_constraint'], globals())
+                    #ind_x = (known_constraint(x) <= 0).numpy() * 1
+                    ind_x = d.evaluate(x) * 1
+                    I_x *= ind_x.reshape(x.shape[0],1)
+                except:
+                    print('Fail to compile the constraint: ' + str(d))
+                    raise
+        return I_x
+
+    def has_known_constraints(self):
+        """
+        Checks if the problem has known_constraints. Note that the coordinates of the constraints are defined
+        in terms of the model inputs and not in terms of the objective inputs. This means that if bandit or
+        discre varaibles are in place, the restrictions should reflect this fact (TODO: implement the
+        mapping of constraints defined on the objective to constraints defined on the model).
+        """
+        return self.known_constraints is not None
+
+    def has_continuous(self):
+        """
+        Returns `true` if the space contains at least one continuous variable, and `false` otherwise
+        """
+        return any(v =="continuous" or v == "Continuous" for v in self._varTypes)
+    
+    def get_continuous_bounds(self):
+        """
+        Extracts the bounds of the continuous variables.
+        """
+        bounds = []
+        for idx, d in enumerate(self._varTypes):
+            if d == 'continuous' or d == "Continuous":
+                bounds.append([self._lower[idx], self._upper[idx]])
+        return bounds
+
+    def get_continuous_dims(self):
+        """
+        Returns the dimension of the continuous components of the space.
+        """
+        continuous_dims = []
+        for i in range(tf.shape(self._lower)[-1]):
+            if self._varTypes[i] == 'continuous' or self._varTypes[i] == "Continuous":
+                continuous_dims += [i]
+        return continuous_dims
+    
+    def round_optimum(self, x: TensorType) -> TensorType:
+        """
+        Rounds some value x to a feasible value in the design space.
+        x is expected to be a vector or an array with a single row
+        param: x is tensorflow with [num_optimization_runs, V, D]
+        """
+        
+        if not (x.ndim == 3):
+            raise ValueError("Unexpected dimentionality of x. Got {}, expected (num_optimization_runs, V, D)".format(x.ndim))
+        
+        rounded_design_x = np.zeros(x.shape) # [num_optimization_runs, V, D]
+        for i in range(x.shape[1]):
+            design_x = x[:,i,:]  # [num_optimization_runs, D]
+            for j in range(x.shape[0]):
+                one_x = design_x[j, :]  # [1, D]
+
+            one_x = np.array(one_x)
+            if not ((one_x.ndim == 1) or (one_x.ndim == 2 and one_x.shape[0] == 1)):
+                raise ValueError("Unexpected dimentionality of x. Got {}, expected (1, N) or (N,)".format(one_x.ndim))
+
+            if one_x.ndim == 2:
+                one_x = one_x[0]
+
+            for idx, varType in enumerate(self._varTypes):
+                var_value = one_x[idx]
+                lower = self._lower[idx]
+                upper = self._upper[idx]
+                if varType == "continuous" or varType == "Continuous":
+                    var_value_rounded = self.round_continuous(lower, upper, var_value)
+                if varType == "discrete" or varType == "Discrete":
+                    var_value_rounded = self.round_discrete(lower, upper, var_value)
+                
+                rounded_design_x[j, i, idx] = var_value_rounded
+
+        return tf.constant(rounded_design_x)
+    
+    def round_continuous(self, lower, upper, value_array):
+        """
+        If value falls within bounds, just return it
+        otherwise return min or max, whichever is closer to the value
+        Assumes an 1d array with a single element as an input.
+        """
+
+        min_value = lower
+        max_value = upper
+
+        rounded_value = value_array
+        if rounded_value < min_value:
+            rounded_value = min_value
+        elif rounded_value > max_value:
+            rounded_value = max_value
+
+        return rounded_value
+    
+    def round_discrete(self, lower, upper, value_array):
+        """
+        Rounds a discrete variable by selecting the closest point in the domain
+        Assumes an 1d array with a single element as an input.
+        """
+        value = value_array
+        domain = np.arange(lower, upper+1)
+        rounded_value = domain[0]
+
+        for domain_value in domain:
+            if np.abs(domain_value - value) < np.abs(rounded_value - value):
+                rounded_value = domain_value
+
+        return rounded_value
